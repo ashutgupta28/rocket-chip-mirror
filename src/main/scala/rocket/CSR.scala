@@ -293,7 +293,8 @@ class CSRFileIO(implicit p: Parameters) extends CoreBundle
     val vstart = Output(UInt(maxVLMax.log2.W))
     val vxrm = Output(UInt(2.W))
     val set_vs_dirty = Input(Bool())
-    val set_vconfig = Flipped(Valid(new VConfig))
+    val set_vtype = Flipped(Valid(new VType))
+    val set_vl = Flipped(Valid(UInt((maxVLMax.log2 + 1).W)))
     val set_vstart = Flipped(Valid(vstart))
     val set_vxsat = Input(Bool())
   })
@@ -339,7 +340,7 @@ class VType(implicit p: Parameters) extends CoreBundle {
   def max_vsew = log2Ceil(eLen/8)
   def max_vlmul = (1 << vlmul_mag.getWidth) - 1
 
-  def lmul_ok: Bool = Mux(this.vlmul_sign, this.vlmul_mag =/= 0.U && ~this.vlmul_mag < max_vsew.U - this.vsew, true.B)
+  def lmul_ok: Bool = Mux(this.vlmul_sign, this.vlmul_mag =/= 0.U && ~this.vlmul_mag < log2Ceil(vLen/8).U - this.vsew, true.B)
 
   def minVLMax: Int = ((maxVLMax / eLen) >> ((1 << vlmul_mag.getWidth) - 1)) max 1
 
@@ -357,13 +358,15 @@ class VType(implicit p: Parameters) extends CoreBundle {
 
 class CSRFile(
   perfEventSets: EventSets = new EventSets(Seq()),
-  customCSRs: Seq[CustomCSR] = Nil,
+      customCSRs: Seq[CustomCSR] = Nil,
   roccCSRs: Seq[CustomCSR] = Nil)(implicit p: Parameters)
+														 
     extends CoreModule()(p)
     with HasCoreParameters {
   val io = IO(new CSRFileIO {
     val customCSRs = Output(Vec(CSRFile.this.customCSRs.size, new CustomCSRIO))
     val roccCSRs = Output(Vec(CSRFile.this.roccCSRs.size, new CustomCSRIO))
+
   })
 
   val reset_mstatus = WireDefault(0.U.asTypeOf(new MStatus()))
@@ -747,15 +750,16 @@ class CSRFile(
   }
 
   // implementation-defined CSRs
-  def generateCustomCSR(csr: CustomCSR) = {
+   def generateCustomCSR(csr: CustomCSR) = {
     require(csr.mask >= 0 && csr.mask.bitLength <= xLen)
     require(!read_mapping.contains(csr.id))
     val reg = csr.init.map(init => RegInit(init.U(xLen.W))).getOrElse(Reg(UInt(xLen.W)))
     read_mapping += csr.id -> reg
     reg
   }
+													   
   val reg_custom = customCSRs.map(generateCustomCSR(_))
-  val reg_rocc = roccCSRs.map(generateCustomCSR(_))
+  val reg_rocc = roccCSRs.map(generateCustomCSR(_))												   
 
   if (usingHypervisor) {
     read_mapping += CSRs.mtinst -> 0.U
@@ -1111,6 +1115,11 @@ class CSRFile(
     io.wdata := wdata
     io.value := reg
   }
+											   
+					 
+					 
+				   
+   
 
   io.rw.rdata := Mux1H(for ((k, v) <- read_mapping) yield decoded_addr(k) -> v)
 
@@ -1432,18 +1441,24 @@ class CSRFile(
       }
     }
     def writeCustomCSR(io: CustomCSRIO, csr: CustomCSR, reg: UInt) = {
+
       val mask = csr.mask.U(xLen.W)
       when (decoded_addr(csr.id)) {
         reg := (wdata & mask) | (reg & ~mask)
         io.wen := true.B
       }
     }
-    for ((io, csr, reg) <- (io.customCSRs, customCSRs, reg_custom).zipped) {
+																			
+								  
+	    for ((io, csr, reg) <- (io.customCSRs, customCSRs, reg_custom).zipped) {
       writeCustomCSR(io, csr, reg)
     }
     for ((io, csr, reg) <- (io.roccCSRs, roccCSRs, reg_rocc).zipped) {
       writeCustomCSR(io, csr, reg)
-    }
+    } 
+																	  
+								  
+	 
     if (usingVector) {
       when (decoded_addr(CSRs.vstart)) { set_vs_dirty := true.B; reg_vstart.get := wdata }
       when (decoded_addr(CSRs.vxrm))   { set_vs_dirty := true.B; reg_vxrm.get := wdata }
@@ -1457,10 +1472,14 @@ class CSRFile(
   }
 
   io.vector.map { vio =>
-    when (vio.set_vconfig.valid) {
+    when (vio.set_vtype.valid) {
       // user of CSRFile is responsible for set_vs_dirty in this case
-      assert(vio.set_vconfig.bits.vl <= vio.set_vconfig.bits.vtype.vlMax)
-      reg_vconfig.get := vio.set_vconfig.bits
+      reg_vconfig.get.vtype := vio.set_vtype.bits
+    }
+    when (vio.set_vl.valid) {
+      // user of CSRFile is responsible for set_vs_dirty in this case
+      assert(vio.set_vl.bits <= vio.set_vtype.bits.vlMax)
+      reg_vconfig.get.vl := vio.set_vl.bits
     }
     when (vio.set_vstart.valid) {
       set_vs_dirty := true.B
@@ -1543,7 +1562,9 @@ class CSRFile(
     t.cause := cause
     t.interrupt := cause(xLen-1)
     t.tval := io.tval
-    t.wdata.foreach(_ := DontCare)
+        t.wdata.foreach(_ := DontCare)
+
+								  
   }
 
   def chooseInterrupt(masksIn: Seq[UInt]): (Bool, UInt) = {
